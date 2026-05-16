@@ -6,7 +6,7 @@ import multiprocessing
 res = None
 workers = multiprocessing.cpu_count() * 2 + 1
 wsgi_app = "app:app"
-bind = "0.0.0.0:10001"
+bind = "127.0.0.1:10001"
 
 
 def on_starting(server):
