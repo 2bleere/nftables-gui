@@ -414,9 +414,13 @@ def insert_sets():
     for i, item in enumerate(result):
         if("set" in item):
             table = get_table(item["set"]["table"], item["set"]["family"])
+            if table is None:
+                continue
             if(check_existing_set(item["set"]["name"], table.id) == True):
-                
-                insert_set(item["set"]["name"],table.id, item["set"]["type"])
+                try:
+                    insert_set(item["set"]["name"],table.id, item["set"]["type"])
+                except Exception as e:
+                    db.session.rollback()
     return "Success"
 
 def check_existing_set(name, table):
@@ -426,6 +430,8 @@ def check_existing_set(name, table):
     return True
 
 def insert_set(name, table_id, type):
+    if isinstance(type, list):
+        type = " . ".join(str(t) for t in type)
     _set = Set(name=name, table_id=table_id, type=type)
     db.session.add(_set)
     db.session.commit()

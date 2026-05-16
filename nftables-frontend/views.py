@@ -679,3 +679,191 @@ def edit_description_post(rule_id):
     description = request.form.get('description')
     service.edit_description(rule_id, description)
     return redirect('/rules/' + rule_id)
+
+# ── K8s Services ──────────────────────────────────────────────────────────────
+import ipaddress as _ipaddress
+
+K8S_SETS = [
+    {"name": "allow_in_v4_tcp", "family": "inet", "table": "edge_fw", "proto": "TCP",  "ip_ver": "IPv4"},
+    {"name": "allow_in_v4_udp", "family": "inet", "table": "edge_fw", "proto": "UDP",  "ip_ver": "IPv4"},
+    {"name": "allow_in_v6_tcp", "family": "inet", "table": "edge_fw", "proto": "TCP",  "ip_ver": "IPv6"},
+    {"name": "allow_in_v6_udp", "family": "inet", "table": "edge_fw", "proto": "UDP",  "ip_ver": "IPv6"},
+]
+_K8S_LOOKUP = {(s["ip_ver"], s["proto"]): s for s in K8S_SETS}
+
+def _ip_version(addr):
+    """Return 'IPv4' or 'IPv6', or raise ValueError for invalid addresses."""
+    obj = _ipaddress.ip_address(addr)
+    return "IPv4" if obj.version == 4 else "IPv6"
+
+def _k8s_elements(set_name, family, table):
+    """Return list of {ip, port, comment} dicts read live from nftables.
+
+    nftables returns two element shapes:
+      plain:    {"concat": [ip, port]}
+      with comment: {"elem": {"val": {"concat": [ip, port]}, "comment": "..."}}
+    """
+    try:
+        result = api.list_elements_in_set(set_name, family, table)
+        elements = []
+        for item in result[1]["nftables"]:
+            if "set" in item and item["set"]["name"] == set_name:
+                for raw in item["set"].get("elem", []):
+                    if not isinstance(raw, dict):
+                        continue
+                    if "elem" in raw:          # has comment wrapper
+                        inner   = raw["elem"]
+                        concat  = inner.get("val", {}).get("concat", [])
+                        comment = inner.get("comment", "")
+                    elif "concat" in raw:      # plain concat, no comment
+                        concat  = raw["concat"]
+                        comment = ""
+                    else:
+                        continue
+                    if len(concat) >= 2:
+                        elements.append({
+                            "ip":      str(concat[0]),
+                            "port":    str(concat[1]),
+                            "comment": comment,
+                        })
+        return sorted(elements, key=lambda e: (_ipaddress.ip_address(e["ip"]), int(e["port"])))
+    except Exception:
+        return []
+
+@visualization_bp.route("/k8s")
+@login_required
+def k8s_services():
+    sets_data = []
+    for s in K8S_SETS:
+        elems = _k8s_elements(s["name"], s["family"], s["table"])
+        sets_data.append({**s, "elements": elems})
+    return render_template("k8s/k8s.html", sets=sets_data)
+
+@creation_bp.route("/k8s/add", methods=["POST"])
+@login_required
+def k8s_add():
+    raw_ips   = request.form.get("ips",   "")
+    raw_ports = request.form.get("ports", "")
+    proto     = request.form.get("proto", "TCP").strip().upper()
+    desc      = request.form.get("description", "").strip()[:200]  # cap at 200 chars
+
+    if proto not in ("TCP", "UDP"):
+        flash("Protocol must be TCP or UDP.", "danger")
+        return redirect("/k8s")
+
+    ips = [x.strip() for x in raw_ips.split(",") if x.strip()]
+    if not ips:
+        flash("Enter at least one IP address.", "danger")
+        return redirect("/k8s")
+
+    port_list = []
+    for p in raw_ports.split(","):
+        p = p.strip()
+        if not p:
+            continue
+        try:
+            pint = int(p)
+            if not (1 <= pint <= 65535):
+                raise ValueError()
+            port_list.append(pint)
+        except ValueError:
+            flash(f"Invalid port: '{p}'. Ports must be 1-65535.", "danger")
+            return redirect("/k8s")
+    if not port_list:
+        flash("Enter at least one port.", "danger")
+        return redirect("/k8s")
+
+    added, errors = [], []
+    for ip in ips:
+        try:
+            ip_ver = _ip_version(ip)
+        except ValueError:
+            errors.append(f"'{ip}' is not a valid IP address")
+            continue
+        set_info = _K8S_LOOKUP.get((ip_ver, proto))
+        if not set_info:
+            errors.append(f"No set for {ip_ver}/{proto}")
+            continue
+        for port_int in port_list:
+            # Build element: wrap in {"elem": ...} when a comment is provided
+            if desc:
+                element = [{"elem": {"val": {"concat": [ip, port_int]}, "comment": desc}}]
+            else:
+                element = [{"concat": [ip, port_int]}]
+            resp = api.add_element_to_set_request(
+                set_name=set_info["name"], set_family=set_info["family"],
+                set_table=set_info["table"], element=element)
+            if resp == "Success":
+                added.append(f"{ip}:{port_int}")
+            else:
+                errors.append(f"{ip}:{port_int} → {resp}")
+
+    if added:
+        flash(f"Added: {', '.join(added)}.", "success")
+    for e in errors:
+        flash(f"Error: {e}", "danger")
+    return redirect("/k8s")
+
+@creation_bp.route("/k8s/delete", methods=["POST"])
+@login_required
+def k8s_delete():
+    set_name = request.form.get("set_name", "").strip()
+    ip       = request.form.get("ip",       "").strip()
+    port     = request.form.get("port",     "").strip()
+    set_info = next((s for s in K8S_SETS if s["name"] == set_name), None)
+    if not set_info or not ip or not port:
+        flash("Invalid input.", "danger")
+        return redirect("/k8s")
+    try:
+        port_int = int(port)
+    except ValueError:
+        flash("Invalid port.", "danger")
+        return redirect("/k8s")
+    element  = [{"concat": [ip, port_int]}]
+    response = api.delete_element_from_set_request(
+        set_name=set_name, set_family=set_info["family"],
+        set_table=set_info["table"], element=element)
+    if response == "Success":
+        flash(f"Removed {ip}:{port_int} from {set_name}.", "success")
+    else:
+        flash(f"Error: {response}", "danger")
+    return redirect("/k8s")
+
+@creation_bp.route("/k8s/edit-description", methods=["POST"])
+@login_required
+def k8s_edit_description():
+    """Delete and re-add the element with an updated (or cleared) comment."""
+    set_name = request.form.get("set_name", "").strip()
+    ip       = request.form.get("ip",       "").strip()
+    port     = request.form.get("port",     "").strip()
+    desc     = request.form.get("description", "").strip()[:200]
+    set_info = next((s for s in K8S_SETS if s["name"] == set_name), None)
+    if not set_info or not ip or not port:
+        flash("Invalid input.", "danger")
+        return redirect("/k8s")
+    try:
+        port_int = int(port)
+    except ValueError:
+        flash("Invalid port.", "danger")
+        return redirect("/k8s")
+    # Delete existing element (nftables matches by value, ignores comment)
+    del_resp = api.delete_element_from_set_request(
+        set_name=set_name, set_family=set_info["family"],
+        set_table=set_info["table"], element=[{"concat": [ip, port_int]}])
+    if del_resp != "Success":
+        flash(f"Could not update: {del_resp}", "danger")
+        return redirect("/k8s")
+    # Re-add with new comment (or without if blank)
+    if desc:
+        element = [{"elem": {"val": {"concat": [ip, port_int]}, "comment": desc}}]
+    else:
+        element = [{"concat": [ip, port_int]}]
+    add_resp = api.add_element_to_set_request(
+        set_name=set_name, set_family=set_info["family"],
+        set_table=set_info["table"], element=element)
+    if add_resp == "Success":
+        label = f'"{desc}"' if desc else "(cleared)"
+        flash(f"Description updated to {label} for {ip}:{port_int}.", "success")
+    else:
+        flash(f"Element deleted but could not re-add: {add_resp}", "danger")
+    return redirect("/k8s")

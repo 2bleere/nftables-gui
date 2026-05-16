@@ -1,0 +1,223 @@
+{% extends "bootstrap/base.html" %}
+{% block title %}K8s Services – nftables-gui{% endblock %}
+{% block head %}
+{{ super() }}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/base.css') }}">
+<style>
+  .k8s-wrapper { max-width:1200px; margin:0 auto; padding:1.5rem 1rem; }
+  .k8s-wrapper h2 { margin-bottom:.25rem; }
+  .subtitle { color:#6c757d; margin-bottom:1.5rem; font-size:.9rem; }
+
+  .card-add .card-header { padding:.75rem 1.25rem; font-weight:600; }
+  .card-add .card-body   { padding:1.25rem 1.5rem 1.5rem; }
+  .card-add label.form-label { font-weight:600; margin-bottom:.3rem; }
+  .hint { display:block; font-size:.78rem; color:#6c757d; font-weight:400; margin-top:.1rem; }
+
+  .set-card .card-header { font-size:.88rem; padding:.55rem 1rem; }
+  .set-card table th, .set-card table td { vertical-align:middle; }
+  .set-card .desc-cell { font-size:.9rem; color:#444; }
+
+  .badge-tcp  { background:#0d6efd; }
+  .badge-udp  { background:#6f42c1; }
+  .badge-ipv4 { background:#198754; }
+  .badge-ipv6 { background:#0dcaf0; color:#000; }
+
+  textarea.form-control { resize:vertical; min-height:58px; }
+  .btn-edit { color:#0d6efd; background:none; border:none; padding:0 4px; font-size:1rem; cursor:pointer; }
+  .btn-edit:hover { color:#0a58ca; }
+</style>
+{% endblock %}
+
+{% block navbar %}
+<nav class="navbar">
+  <div><a class="navbar-brand" href="/">nftables-gui</a></div>
+  <div class="collapse navbar-collapse" id="navbarNav">
+    <ul class="navbar-nav ml-auto">
+      <li class="nav-item{% if request.path == '/tables' %} active{% endif %}"><a class="nav-link" href="/tables">Tables</a></li>
+      <li class="nav-item{% if request.path == '/chains' %} active{% endif %}"><a class="nav-link" href="/chains">Chains</a></li>
+      <li class="nav-item{% if request.path == '/rules' %} active{% endif %}"><a class="nav-link" href="/rules">Rules</a></li>
+      <li class="nav-item{% if request.path == '/list_ruleset' %} active{% endif %}"><a class="nav-link" href="/list_ruleset">List ruleset</a></li>
+      <li class="nav-item{% if request.path == '/sets' %} active{% endif %}"><a class="nav-link" href="/sets">Sets</a></li>
+      <li class="nav-item{% if request.path == '/maps' %} active{% endif %}"><a class="nav-link" href="/maps">Maps</a></li>
+      <li class="nav-item{% if request.path == '/users' %} active{% endif %}"><a class="nav-link" href="/users">Users</a></li>
+      <li class="nav-item{% if request.path == '/k8s' %} active{% endif %}"><a class="nav-link" href="/k8s">K8s Services</a></li>
+    </ul>
+    <div class="salida">
+      <button class="button-save" onclick="location.href='/save-changes'">Save changes</button>
+      <p class="parrafo">{{ current_user.username }}</p>
+      <button class="button-logout" onclick="location.href='/logout'">Logout</button>
+    </div>
+  </div>
+</nav>
+{% endblock %}
+
+{% block content %}
+<div class="k8s-wrapper">
+
+  <h2>K8s Service Access Rules</h2>
+  <p class="subtitle">Controls which external IPs may reach services in the cluster. IPv4 vs IPv6 is detected automatically.</p>
+
+  {% with msgs = get_flashed_messages(with_categories=true) %}
+    {% for cat, msg in msgs %}
+      <div class="alert alert-{{ cat }} alert-dismissible fade show" role="alert">
+        {{ msg }}<button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+      </div>
+    {% endfor %}
+  {% endwith %}
+
+  <!-- ── Add Rules ───────────────────────────────────────────── -->
+  <div class="card card-add border-primary mb-4">
+    <div class="card-header bg-primary text-white">➕ Add Rules</div>
+    <div class="card-body">
+      <form method="POST" action="/k8s/add">
+        <div class="row g-3">
+          <div class="col-lg-4 col-md-6">
+            <label class="form-label">IP Address(es)
+              <span class="hint">Comma-separated · IPv4 and/or IPv6</span>
+            </label>
+            <textarea name="ips" class="form-control font-monospace"
+              placeholder="23.189.216.2, 2620:cd:a000::2" required></textarea>
+          </div>
+          <div class="col-lg-2 col-md-3">
+            <label class="form-label">Port(s)
+              <span class="hint">Comma-separated</span>
+            </label>
+            <input type="text" name="ports" class="form-control font-monospace" placeholder="80, 443" required>
+          </div>
+          <div class="col-lg-2 col-md-3">
+            <label class="form-label">Protocol
+              <span class="hint">&nbsp;</span>
+            </label>
+            <select name="proto" class="form-select">
+              <option value="TCP" selected>TCP</option>
+              <option value="UDP">UDP</option>
+            </select>
+          </div>
+          <div class="col-lg-4 col-md-12">
+            <label class="form-label">Description
+              <span class="hint">Optional · stored as nftables comment</span>
+            </label>
+            <input type="text" name="description" class="form-control"
+              placeholder="e.g. Cloudflare edge – prod" maxlength="200">
+          </div>
+        </div>
+        <div class="mt-3">
+          <button type="submit" class="btn btn-primary px-4">Add Rules</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ── Set Tables ──────────────────────────────────────────── -->
+  <div class="row g-4">
+  {% for s in sets %}
+  <div class="col-xl-6">
+    <div class="card set-card h-100">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span>
+          <span class="badge badge-ipv{{ '4' if s.ip_ver == 'IPv4' else '6' }} me-1">{{ s.ip_ver }}</span>
+          <span class="badge badge-{{ s.proto | lower }} me-2">{{ s.proto }}</span>
+          <code style="font-size:.85rem">{{ s.name }}</code>
+        </span>
+        <span class="badge bg-secondary">{{ s.elements|length }} rule{% if s.elements|length != 1 %}s{% endif %}</span>
+      </div>
+      <div class="card-body p-0">
+        {% if s.elements %}
+        <table class="table table-sm table-hover table-bordered mb-0">
+          <thead class="table-dark">
+            <tr>
+              <th>IP Address</th>
+              <th style="width:70px">Port</th>
+              <th>Description</th>
+              <th style="width:80px"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for e in s.elements %}
+            <tr>
+              <td class="font-monospace small">{{ e.ip }}</td>
+              <td class="font-monospace">{{ e.port }}</td>
+              <td class="desc-cell">
+                {{ e.comment if e.comment else '' }}
+                <button type="button" class="btn-edit"
+                  title="Edit description"
+                  data-set="{{ s.name }}"
+                  data-ip="{{ e.ip }}"
+                  data-port="{{ e.port }}"
+                  data-comment="{{ e.comment | e }}">✏️</button>
+              </td>
+              <td class="p-1 text-center">
+                <form method="POST" action="/k8s/delete"
+                  onsubmit="return confirm('Remove {{ e.ip }}:{{ e.port }} from {{ s.name }}?')">
+                  <input type="hidden" name="set_name" value="{{ s.name }}">
+                  <input type="hidden" name="ip"       value="{{ e.ip }}">
+                  <input type="hidden" name="port"     value="{{ e.port }}">
+                  <button type="submit" class="btn btn-danger btn-sm">✕</button>
+                </form>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="text-muted p-3 mb-0 small">No rules in this set.</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+  </div>
+
+</div><!-- /k8s-wrapper -->
+
+<!-- ── Edit Description Modal (Bootstrap 3 / jQuery) ───────────── -->
+<div class="modal fade" id="editDescModal" tabindex="-1" role="dialog">
+  <div class="modal-dialog" role="document">
+    <div class="modal-content">
+      <form method="POST" action="/k8s/edit-description">
+        <div class="modal-header">
+          <button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
+          <h4 class="modal-title">Edit Description</h4>
+        </div>
+        <div class="modal-body">
+          <p class="text-muted" id="editModalSubtitle" style="font-size:.9rem;margin-bottom:1rem"></p>
+          <input type="hidden" name="set_name" id="modal_set_name">
+          <input type="hidden" name="ip"       id="modal_ip">
+          <input type="hidden" name="port"     id="modal_port">
+          <div class="form-group">
+            <label for="modal_description"><strong>Description</strong></label>
+            <input type="text" name="description" id="modal_description"
+              class="form-control" maxlength="200"
+              placeholder="Leave blank to clear">
+            <span class="help-block">Stored as a nftables element comment. Leave blank to remove.</span>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-default" data-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+$(document).on('click', '.btn-edit', function () {
+  var btn = $(this);
+  document.getElementById('modal_set_name').value    = btn.data('set');
+  document.getElementById('modal_ip').value          = btn.data('ip');
+  document.getElementById('modal_port').value        = btn.data('port');
+  document.getElementById('modal_description').value = btn.data('comment') || '';
+  document.getElementById('editModalSubtitle').textContent =
+    btn.data('ip') + ' : ' + btn.data('port') + '  \u2014  ' + btn.data('set');
+  $('#editDescModal').modal('show');
+});
+$('#editDescModal').on('shown.bs.modal', function () {
+  document.getElementById('modal_description').focus();
+});
+</script>
+{% endblock %}
